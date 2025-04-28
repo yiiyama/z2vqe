@@ -7,10 +7,11 @@ from scipy.optimize import minimize
 import jax
 import jax.numpy as jnp
 import jaxopt
+from qiskit.circuit import QuantumCircuit
 from qiskit.circuit.parametervector import ParameterVectorElement
 
 
-def make_state_fn_elements(ansatz):
+def make_circuit_fn_elements(ansatz):
     import qujax
 
     constant_gates = {
@@ -75,15 +76,16 @@ def make_state_fn_elements(ansatz):
     return gates_seq, qubit_inds_seq, param_inds_seq
 
 
-def make_state_fn(*args):
+def make_circuit_fn(*args):
+    """Return a function (params, state) ↦ state."""
     from qujax.statetensor import _gate_func_to_unitary, apply_gate
 
-    if len(args) == 1:
-        gates_seq, qubit_inds_seq, param_inds_seq = make_state_fn_elements(args[0])
+    if len(args) == 1 and isinstance(args[0], QuantumCircuit):
+        gates_seq, qubit_inds_seq, param_inds_seq = make_circuit_fn_elements(args[0])
     else:
         gates_seq, qubit_inds_seq, param_inds_seq = args
 
-    def state_fn(params, statetensor):
+    def circuit_fn(params, statetensor):
         params = jnp.atleast_1d(params)
 
         for gate_func, qubit_inds, param_inds in zip(
@@ -95,7 +97,15 @@ def make_state_fn(*args):
             statetensor = apply_gate(statetensor, gate_unitary, qubit_inds)
         return statetensor
 
-    return state_fn
+    return circuit_fn
+
+
+def make_static_state(circuit):
+    """Return a state constructed by a non-parametrized QuantumCircuit."""
+    from qujax.statetensor import all_zeros_statetensor
+
+    return make_circuit_fn(circuit)(jnp.array([]),
+                                    all_zeros_statetensor(circuit.num_qubits))
 
 
 def make_expval_fn(hamiltonian):
@@ -114,11 +124,12 @@ def make_expval_fn(hamiltonian):
         pauli_prods.append(pauli_prod)
         supports.append(support)
 
-    return get_statetensor_to_expectation_func(pauli_prods, supports, hamiltonian.coeffs)
+    return jax.jit(get_statetensor_to_expectation_func(pauli_prods, supports, hamiltonian.coeffs))
 
 
-def make_ansatz_fn(ansatz_layer, num_layers):
-    ansatz_layer_fn = jax.jit(make_state_fn(ansatz_layer))
+def make_ansatz_circuit_fn(ansatz_layer, num_layers):
+    """Return a circuit function from repeated ansatz layers."""
+    ansatz_layer_fn = jax.jit(make_circuit_fn(ansatz_layer))
 
     def _ansatz_layer(ilayer, val):
         params, state = val
@@ -126,21 +137,49 @@ def make_ansatz_fn(ansatz_layer, num_layers):
         # pylint: disable-next=not-callable
         return params, ansatz_layer_fn(layer_params, state)
 
-    def ansatz_fn(params, state):
+    @jax.jit
+    def ansatz_circuit_fn(params, state):
         _, state = jax.lax.fori_loop(0, num_layers, _ansatz_layer, (params, state))
         return state
 
-    return ansatz_fn
+    return ansatz_circuit_fn
+
+
+def make_state_fn(init_state, ansatz_layer, num_layers):
+    ansatz_fn = make_ansatz_circuit_fn(ansatz_layer, num_layers)
+    initial_state = make_static_state(init_state)
+    return jax.jit(lambda params: ansatz_fn(params, initial_state))
 
 
 def make_cost_fn(init_state, ansatz_layer, num_layers, hamiltonian):
-    from qujax.statetensor import all_zeros_statetensor
-
-    ansatz_fn = make_ansatz_fn(ansatz_layer, num_layers)
+    state_fn = make_state_fn(init_state, ansatz_layer, num_layers)
     expval_fn = make_expval_fn(hamiltonian)
-    initial_state = make_state_fn(init_state)(jnp.array([]),
-                                              all_zeros_statetensor(init_state.num_qubits))
-    return lambda params: expval_fn(ansatz_fn(params / np.pi, initial_state)).real
+    # pylint: disable-next=not-callable
+    return jax.jit(lambda params: expval_fn(state_fn(params)).real)
+
+
+def make_qfim_fn(init_state, ansatz_layer, num_layers):
+    state_fn = make_state_fn(init_state, ansatz_layer, num_layers)
+
+    def statevector_fn(params):
+        # pylint: disable-next=not-callable
+        return state_fn(params).reshape(-1)
+
+    jacobian_fn = jax.jit(jax.jacfwd(statevector_fn))
+
+    @jax.jit
+    def qfim_fn(params):
+        state = statevector_fn(params)
+        # pylint: disable-next=not-callable
+        jacobian = jacobian_fn(params)
+        qfim = jnp.tensordot(jacobian.conjugate(), jacobian, axes=(0, 0))
+        qfim -= jnp.outer(
+            jnp.tensordot(jacobian.conjugate(), state, axes=(0, 0)),
+            jnp.tensordot(state.conjugate(), jacobian, axes=(0, 0))
+        )
+        return 4. * qfim.real
+
+    return qfim_fn
 
 
 def vqe_scipy(cost_fn, init, maxiter):
