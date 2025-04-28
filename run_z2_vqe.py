@@ -6,7 +6,7 @@ from argparse import ArgumentParser
 import numpy as np
 import jax
 import h5py
-sys.path.append(os.path.join(os.dirname(__file__), 'src'))
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 from z2_lgt import initial_state, z2_ansatz_layer, create_hamiltonian, calculate_num_params
 from z2_vqe import make_cost_fn, vqe_jaxopt
 
@@ -41,10 +41,11 @@ if __name__ == '__main__':
 
     init_state, _ = initial_state(options.sites, boundary_cond)
     ansatz_layer = z2_ansatz_layer(options.sites, boundary_cond)
-    hamiltonian = create_hamiltonian(options.sites, options.j_hopping, options.f_gauge, options.mass, overall_coeff,
-                                     boundary_cond, overall_coeff_cond=False)
+    hamiltonian = create_hamiltonian(options.sites, options.j_hopping, options.f_gauge,
+                                     options.mass, overall_coeff, boundary_cond,
+                                     overall_coeff_cond=False)
 
-    cost_fn = jax.jit(make_cost_fn(init_state, ansatz_layer, options.layers, hamiltonian))
+    cost_fn = make_cost_fn(init_state, ansatz_layer, options.layers, hamiltonian)
 
     num_parameters = calculate_num_params(options.sites, options.layers, trans_inv)
     instances_per_device = max(1, options.instances // num_devices)
