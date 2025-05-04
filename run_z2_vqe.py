@@ -21,6 +21,7 @@ if __name__ == '__main__':
     parser.add_argument('f_gauge', type=float)
     parser.add_argument('mass', type=float)
     parser.add_argument('-i', '--maxiter', type=int, default=10000)
+    parser.add_argument('-s', '--stepsize', type=float, default=0.)
     parser.add_argument('-c', '--instances', type=int, default=1)
     parser.add_argument('-g', '--gpus', type=str, nargs='+', default=['0'])
     parser.add_argument('-o', '--out')
@@ -51,7 +52,7 @@ if __name__ == '__main__':
     instances_per_device = max(1, options.instances // num_devices)
     x0 = 2 * np.pi * np.random.random((num_devices, instances_per_device, num_parameters))
 
-    energies = vqe_jaxopt(cost_fn, x0, options.maxiter)
+    energies = vqe_jaxopt(cost_fn, x0, options.maxiter, stepsize=options.stepsize)
     energies = energies.reshape(-1, num_devices * instances_per_device)
 
     if not options.out:
@@ -66,4 +67,6 @@ if __name__ == '__main__':
         group.create_dataset('f_gauge', data=options.f_gauge)
         group.create_dataset('mass', data=options.mass)
         group.create_dataset('maxiter', data=options.maxiter)
+        group.create_dataset('stepsize', data=options.stepsize)
+        group.create_dataset('x0', data=x0.reshape(-1, num_parameters))
         group.create_dataset('energies', data=energies)

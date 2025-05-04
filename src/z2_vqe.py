@@ -205,8 +205,8 @@ def vqe_scipy(cost_fn, init, maxiter):
     return np.array(energies)
 
 
-def vqe_jaxopt(cost_fn, init, maxiter, print_every=100):
-    solver = jaxopt.GradientDescent(fun=cost_fn, acceleration=False)
+def vqe_jaxopt(cost_fn, init, maxiter, stepsize=0., print_every=100):
+    solver = jaxopt.GradientDescent(fun=cost_fn, stepsize=stepsize, acceleration=False)
     init_state_fn = jax.pmap(jax.vmap(solver.init_state))
     update = jax.pmap(jax.vmap(solver.update))
     value = jax.pmap(jax.vmap(cost_fn))
