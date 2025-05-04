@@ -51,7 +51,7 @@ if __name__ == '__main__':
             num_parameters = calculate_num_params(num_sites, num_layers, trans_inv)
             params = 2 * np.pi * np.random.random((num_devices, points_per_device, num_parameters))
             matrices = qfim_fn(params).reshape(-1, num_parameters, num_parameters)
-            ranks = np.linalg.matrix_rank(matrices, tol=1.e-12, hermitian=True)
+            ranks = np.linalg.matrix_rank(matrices, tol=1.e-9, hermitian=True)
 
             group = out.create_group(f'qfim_{num_sites}sites_{num_layers}layers')
             group.create_dataset('params', data=params.reshape(-1, num_parameters))
