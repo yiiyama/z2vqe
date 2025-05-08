@@ -23,6 +23,7 @@ if __name__ == '__main__':
     parser.add_argument('-i', '--maxiter', type=int, default=10000)
     parser.add_argument('-s', '--stepsize', type=float, default=0.)
     parser.add_argument('-c', '--instances', type=int, default=1)
+    parser.add_argument('-r', '--seed', type=int)
     parser.add_argument('-g', '--gpus', type=str, nargs='+', default=['0'])
     parser.add_argument('-o', '--out')
     options = parser.parse_args()
@@ -50,10 +51,10 @@ if __name__ == '__main__':
 
     num_parameters = calculate_num_params(options.sites, options.layers, trans_inv)
     instances_per_device = max(1, options.instances // num_devices)
-    x0 = 2 * np.pi * np.random.random((num_devices, instances_per_device, num_parameters))
+    rng = np.random.default_rng(options.seed)
+    x0 = 2 * np.pi * rng.random((num_devices, instances_per_device, num_parameters))
 
-    energies = vqe_jaxopt(cost_fn, x0, options.maxiter, stepsize=options.stepsize)
-    energies = energies.reshape(-1, num_devices * instances_per_device)
+    energies, parameters = vqe_jaxopt(cost_fn, x0, options.maxiter, stepsize=options.stepsize)
 
     if not options.out:
         options.out = (f'vqe_{options.sites}sites_{options.layers}layers_'
@@ -70,3 +71,4 @@ if __name__ == '__main__':
         group.create_dataset('stepsize', data=options.stepsize)
         group.create_dataset('x0', data=x0.reshape(-1, num_parameters))
         group.create_dataset('energies', data=energies)
+        group.create_dataset('parameters', data=parameters)

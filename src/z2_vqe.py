@@ -1,6 +1,7 @@
 # pylint: disable=import-outside-toplevel, wrong-import-position, invalid-name
 """Functions for Z2 LGT VQE."""
 import time
+from datetime import datetime
 from numbers import Number
 import numpy as np
 from scipy.optimize import minimize
@@ -207,25 +208,33 @@ def vqe_scipy(cost_fn, init, maxiter):
 
 def vqe_jaxopt(cost_fn, init, maxiter, stepsize=0., print_every=100):
     solver = jaxopt.GradientDescent(fun=cost_fn, stepsize=stepsize, acceleration=False)
-    init_state_fn = jax.pmap(jax.vmap(solver.init_state))
-    update = jax.pmap(jax.vmap(solver.update))
-    value = jax.pmap(jax.vmap(cost_fn))
+    update = jax.pmap(jax.jit(jax.vmap(solver.update)))
+    value = jax.pmap(jax.jit(jax.vmap(cost_fn)))
+
+    num_params = init.shape[-1]
+    num_instances = np.prod(init.shape[:-1])
 
     params = jnp.array(init)
-    state = init_state_fn(params)
+    state = jax.pmap(jax.jit(jax.vmap(solver.init_state)))(params)
+
+    energies = np.empty((num_instances, maxiter + 1))
+    parameters = np.empty((num_instances, maxiter + 1, num_params))
 
     start_time = time.time()
-
     print('Compiling the cost function..')
+    energies[:, 0] = value(params).reshape(num_instances)
     update(params, state)  # pylint: disable=not-callable
     print(f'Compilation of the cost function took {time.time() - start_time} seconds')
 
-    start_time = time.time()
-    energies = []
-    for _ in range(maxiter):
-        params, state = update(params, state)
-        energies.append(value(params).reshape(-1))
-        if print_every > 0 and len(energies) % print_every == 1:
-            print(f'Iteration: {len(energies)}, elapsed time: {time.time() - start_time} seconds')
+    parameters[:, 0, :] = params.reshape(num_instances, num_params)
 
-    return np.array(energies)
+    start_time = time.time()
+    for istep in range(maxiter):
+        params, state = update(params, state)
+        energies[:, istep + 1] = value(params).reshape(num_instances)
+        parameters[:, istep + 1, :] = params.reshape(num_instances, num_params)
+        if print_every > 0 and istep % print_every == 0:
+            print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} Iteration: {istep}'
+                  f', elapsed time: {time.time() - start_time} seconds')
+
+    return energies, parameters
