@@ -188,37 +188,42 @@ def get_symmetry_sector(state: np.ndarray) -> tuple[np.ndarray, float]:
     Returns:
         A tuple of an array for the Gauss's law sector and a float for the U1 sector.
     """
-
     num_qubits = np.log2(state.shape[0]).astype(int)
     num_sites = num_qubits // 2
     # Reshape the state to make it applicable to single-qubit operations
     state = state.reshape((2,) * num_qubits)
-    # Single-qubit Hadamard matrix
-    hadamard = np.array([[1., 1.], [1., -1.]]) / np.sqrt(2.)
-    # Transform all link qubits to X basis
+    # Compute the Gauss's law and U1 eigenvalues
+    gauss_sector = np.empty(num_sites, dtype=int)
+    u1_test = np.zeros_like(state)
+    paulix = np.array([[0., 1.], [1., 0.]], dtype=complex)
+    pauliz = np.array([[1., 0.], [0., -1.]], dtype=complex)
     for isite in range(num_sites):
-        # tensordot places the resulting qubit to axis 0, so we move it back to the original
-        # position with moveaxis
-        state = np.moveaxis(np.tensordot(hadamard, state, [1, isite * 2 + 1]), 0, isite * 2 + 1)
-
-    # Compute the Z eigenvalue of each qubit
-    zeigvals = np.empty(num_qubits, dtype=int)
-    for iqubit in range(num_qubits):
-        # Move the qubit to axis 0 (just to make array indexing easier)
-        moved = np.moveaxis(state, iqubit, 0)
-        # If the amplitude of moved[0] is 0, the state has only |1> for this qubit -> Z=-1
-        if np.allclose(moved[0], 0.):
-            zeigvals[iqubit] = -1
-        # If the amplitude of moved[1] is 0, the state has only |0> for this qubit -> Z=1
-        elif np.allclose(moved[1], 0.):
-            zeigvals[iqubit] = 1
+        # Gauss's law: apply X, Z, X separately
+        test = state.copy()
+        iq = (isite * 2 - 1) % num_qubits
+        test = np.moveaxis(np.tensordot(paulix, test, [1, iq]), 0, iq)
+        iq = isite * 2
+        test = np.moveaxis(np.tensordot(pauliz, test, [1, iq]), 0, iq)
+        iq = isite * 2 + 1
+        test = np.moveaxis(np.tensordot(paulix, test, [1, iq]), 0, iq)
+        if np.allclose(test, state):
+            gauss_sector[isite] = 1
+        elif np.allclose(test, -state):
+            gauss_sector[isite] = -1
         else:
             raise ValueError('Not a Gauss law eigenstate')
 
-    # gauss_sector[i] = zeigvals[2i-1] * zeigvals[2i] * zeigvals[2i+1]
-    gauss_sector = np.roll(zeigvals, -1)[::2] * zeigvals[::2] * np.roll(zeigvals, 1)[::2]
-    # u1_sector[i] = sum_i [zeigvals[2i] / N]
-    u1_sector = np.sum(zeigvals[::2]) / num_sites
+        # U1: apply Z and add up
+        iq = isite * 2
+        u1_test += np.moveaxis(np.tensordot(pauliz, state, [1, iq]), 0, iq)
+
+    # Validate and compute the U1 eigenvalue
+    norm = state.reshape(-1).conjugate() @ u1_test.reshape(-1)
+    # Are state and u1_test parallel and norm an integer?
+    if not (np.allclose(norm * state, u1_test) and np.isclose(np.round(norm.real), norm)):
+        raise ValueError('Not a U1 eigenstate')
+    u1_sector = np.round(norm.real) / num_sites
+
     return gauss_sector, u1_sector
 
 
