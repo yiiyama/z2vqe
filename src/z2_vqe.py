@@ -130,18 +130,30 @@ def make_expval_fn(hamiltonian):
 
 def make_ansatz_circuit_fn(ansatz_layer, num_layers):
     """Return a circuit function from repeated ansatz layers."""
-    ansatz_layer_fn = jax.jit(make_circuit_fn(ansatz_layer))
+    if isinstance(ansatz_layer, list):
+        assert len(ansatz_layer) == num_layers
+        layer_fns = [make_circuit_fn(layer) for layer in ansatz_layer]
 
-    def _ansatz_layer(ilayer, val):
-        params, state = val
-        layer_params = jax.lax.dynamic_slice(params, (ilayer * 5,), (5,))
-        # pylint: disable-next=not-callable
-        return params, ansatz_layer_fn(layer_params, state)
+        @jax.jit
+        def ansatz_circuit_fn(params, state):
+            for ilayer, layer_fn in enumerate(layer_fns):
+                layer_params = jax.lax.dynamic_slice(params, (ilayer * 5,), (5,))
+                state = layer_fn(layer_params, state)
+            return state
 
-    @jax.jit
-    def ansatz_circuit_fn(params, state):
-        _, state = jax.lax.fori_loop(0, num_layers, _ansatz_layer, (params, state))
-        return state
+    else:
+        ansatz_layer_fn = jax.jit(make_circuit_fn(ansatz_layer))
+
+        def _ansatz_layer(ilayer, val):
+            params, state = val
+            layer_params = jax.lax.dynamic_slice(params, (ilayer * 5,), (5,))
+            # pylint: disable-next=not-callable
+            return params, ansatz_layer_fn(layer_params, state)
+
+        @jax.jit
+        def ansatz_circuit_fn(params, state):
+            _, state = jax.lax.fori_loop(0, num_layers, _ansatz_layer, (params, state))
+            return state
 
     return ansatz_circuit_fn
 

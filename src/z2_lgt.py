@@ -91,7 +91,7 @@ def z2_ansatz(num_sites, num_layers, num_params, boundary_cond, trans_inv):
     return circuit
 
 
-def z2_ansatz_layer(num_sites, boundary_cond, params=None):
+def z2_ansatz_layer(num_sites, boundary_cond, params=None, rng=None):
     """Make a QuantumCircuit corresponding to a single ansatz layer unitary.
 
     Copied from the VQE notebook.
@@ -105,29 +105,35 @@ def z2_ansatz_layer(num_sites, boundary_cond, params=None):
         params = ParameterVector('theta', 5)
 
     circuit = QuantumCircuit(num_qubits)
-    ip = 0
-    for i in range(1, num_qubits - 2, 4):
-        circuit.append(xyz_gate(params[ip]), [i + 2, i + 1, i])
-    ip += 1
 
-    for i in range(3, num_qubits - 2, 4):
-        circuit.append(xyz_gate(params[ip]), [i + 2, i + 1, i])
-    if num_sites % 2 == 0 and boundary_cond == 'closed':
-        circuit.append(xyz_gate(params[ip]), [1, 0, num_qubits - 1])
-    ip += 1
+    def hopping_even_term(param):
+        for i in range(1, num_qubits - 2, 4):
+            circuit.append(xyz_gate(param), [i + 2, i + 1, i])
 
-    circuit.barrier()
+    def hopping_odd_term(param):
+        for i in range(3, num_qubits - 2, 4):
+            circuit.append(xyz_gate(param), [i + 2, i + 1, i])
+        if num_sites % 2 == 0 and boundary_cond == 'closed':
+            circuit.append(xyz_gate(param), [1, 0, num_qubits - 1])
 
-    for i in range(3, num_qubits, 4):
-        circuit.rz(params[ip], i)
-    ip += 1
-    for i in range(1, num_qubits, 4):
-        circuit.rz(params[ip], i)
-    ip += 1
+    def mass_even_term(param):
+        for i in range(1, num_qubits, 4):
+            circuit.rz(param, i)
 
-    for i in range(0, num_qubits, 2):
-        circuit.rx(params[ip], i)
-    ip += 1
+    def mass_odd_term(param):
+        for i in range(3, num_qubits, 4):
+            circuit.rz(param, i)
+
+    def gauge_term(param):
+        for i in range(0, num_qubits, 2):
+            circuit.rx(param, i)
+
+    terms = [hopping_even_term, hopping_odd_term, mass_even_term, mass_odd_term, gauge_term]
+    if rng is not None:
+        rng.shuffle(terms)
+
+    for term, param in zip(terms, params):
+        term(param)
 
     return circuit
 
