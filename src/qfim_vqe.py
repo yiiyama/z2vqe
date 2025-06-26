@@ -1,0 +1,121 @@
+"""Generic functions for QFIM calculation and VQE."""
+import time
+import logging
+import numpy as np
+import jax
+import jax.numpy as jnp
+import jaxopt
+
+LOG = logging.getLogger(__name__)
+
+
+def make_ansatz_layer_fn(generators):
+    diagonals = np.diagonal(generators, axis1=1, axis2=2)
+    diagmat = np.zeros_like(generators)
+    dim = generators.shape[1]
+    diagmat[:, np.arange(dim), np.arange(dim)] = diagonals
+    is_diagonal = np.all(np.isclose(generators, diagmat), axis=(1, 2))
+
+    @jax.jit
+    def fn(params, state):
+        for igen, generator in enumerate(generators):
+            if is_diagonal[igen]:
+                state *= jnp.exp(-0.5j * params[igen] * diagonals[igen])
+            else:
+                state = jax.scipy.linalg.expm(-0.5j * params[igen] * generator) @ state
+
+        return state
+
+    return fn
+
+
+def make_ansatz_fn(generators, num_layers):
+    layer_fn = make_ansatz_layer_fn(generators)
+
+    @jax.jit
+    def apply_layer(ilayer, args):
+        params, state = args
+        layer_params = params.reshape((-1, generators.shape[0]))[ilayer]
+        state = layer_fn(layer_params, state)
+        return (params, state)
+
+    @jax.jit
+    def fn(params, initial_state):
+        _, state = jax.lax.fori_loop(0, num_layers, apply_layer, (params, initial_state))
+        return state
+
+    return fn
+
+
+def make_qfim_fn(generators, num_layers):
+    ansatz_fn = make_ansatz_fn(generators, num_layers)
+    jacobian_fn = jax.jit(jax.jacfwd(ansatz_fn))
+
+    @jax.jit
+    def fn(params, initial_state):
+        state = ansatz_fn(params, initial_state)
+        # pylint: disable-next=not-callable
+        jacobian = jacobian_fn(params, initial_state)
+        qfim = jnp.tensordot(jacobian.conjugate(), jacobian, axes=(0, 0)).real
+        qfim -= jnp.outer(
+            jnp.tensordot(jacobian.conjugate(), state, axes=(0, 0)),
+            jnp.tensordot(state.conjugate(), jacobian, axes=(0, 0))
+        ).real
+        return qfim
+
+    return fn
+
+
+def make_cost_fn(generators, num_layers):
+    ansatz_fn = make_ansatz_fn(generators, num_layers)
+
+    @jax.jit
+    def fn(params, initial_state, hamiltonian):
+        state = ansatz_fn(params, initial_state)
+        energy = (state.conjugate() @ hamiltonian @ state).real
+        return energy
+
+    return fn
+
+
+def vqe(cost_fn, initial_state, hamiltonian, param_init, maxiter, stepsize=0., print_every=100):
+    solver = jaxopt.GradientDescent(fun=cost_fn, stepsize=stepsize, acceleration=False)
+    update = jax.pmap(
+        jax.jit(
+            jax.vmap(solver.update, in_axes=(0, 0, None, None))
+        ),
+        in_axes=(0, 0, None, None)
+    )
+    value = jax.pmap(
+        jax.jit(
+            jax.vmap(cost_fn, in_axes=(0, None, None))
+        ),
+        in_axes=(0, None, None)
+    )
+
+    num_params = param_init.shape[-1]
+    num_instances = np.prod(param_init.shape[:-1])
+
+    params = jnp.array(param_init)
+    state = jax.pmap(jax.jit(jax.vmap(solver.init_state)))(params)
+
+    energies = np.empty((num_instances, maxiter + 1))
+    parameters = np.empty((num_instances, maxiter + 1, num_params))
+
+    start_time = time.time()
+    LOG.info('Compiling the cost function..')
+    energies[:, 0] = value(params, initial_state, hamiltonian).reshape(num_instances)
+    update(params, state, initial_state, hamiltonian)  # pylint: disable=not-callable
+    LOG.info('Compilation of the cost function took %.2f seconds', time.time() - start_time)
+
+    parameters[:, 0, :] = params.reshape(num_instances, num_params)
+
+    start_time = time.time()
+    for istep in range(maxiter):
+        params, state = update(params, state, initial_state, hamiltonian)
+        energies[:, istep + 1] = value(params, initial_state, hamiltonian).reshape(num_instances)
+        parameters[:, istep + 1, :] = params.reshape(num_instances, num_params)
+        if print_every > 0 and istep % print_every == 0:
+            LOG.info('Iteration: %d, elapsed time: %.2f seconds', istep, time.time() - start_time)
+
+    return energies, parameters
