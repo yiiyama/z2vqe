@@ -67,25 +67,30 @@ def generators(gauss_eigvals):
     ])
 
 
-def symmetry_sector(gauss_eigvals, u1_charge=0, t2_momentum=0, cp_parity=1, npmod=np):
+def symmetry_sector(
+    gauss_eigvals,
+    u1_charge=0,
+    t2_momentum=0,
+    cp_parity=1,
+    diagonalize=True,
+    npmod=np
+):
     num_sites = len(gauss_eigvals)
     subspace = None
 
     if u1_charge is not None:
-        def u1_kernel(basis):
-            """Project basis to the kernel of (Q-qI)."""
-            idx = npmod.arange(2 ** num_sites)
-            bidx = ((idx[:, None] >> npmod.arange(num_sites)[None, ::-1]) % 2).astype(bool)
-            charges = npmod.zeros(2 ** num_sites, dtype=int)
-            for ilink, gn in enumerate(gauss_eigvals):
-                parity = bidx[:, num_sites - 1 - ilink] == bidx[:, (-ilink) % num_sites]
-                charges += (-1 + 2 * parity.astype(int)) * gn
-            return basis * (charges != u1_charge)[:, None]
-
-        if npmod is jnp:
-            u1_kernel = jax.jit(u1_kernel)
-
-        subspace = get_eigenspace(u1_kernel, dim=2 ** num_sites)
+        idx = npmod.arange(2 ** num_sites)
+        bidx = ((idx[:, None] >> npmod.arange(num_sites)[None, ::-1]) % 2).astype(bool)
+        charges = npmod.zeros(2 ** num_sites, dtype=int)
+        for ilink, gn in enumerate(gauss_eigvals):
+            parity = bidx[:, num_sites - 1 - ilink] == bidx[:, (-ilink) % num_sites]
+            charges += (-1 + 2 * parity.astype(int)) * gn
+        idx = np.nonzero(charges == u1_charge)[0]
+        if npmod is np:
+            subspace = np.zeros((2 ** num_sites, idx.shape[0]), dtype=np.complex128)
+            subspace[idx, np.arange(idx.shape[0])] = 1.
+        else:
+            subspace = jax.nn.one_hot(idx, 2 ** num_sites).T
 
     if t2_momentum is not None:
         subspace = translation_eigenspace(t2_momentum, basis=subspace, num_spins=num_sites,
@@ -104,8 +109,10 @@ def symmetry_sector(gauss_eigvals, u1_charge=0, t2_momentum=0, cp_parity=1, npmo
 
         subspace = get_eigenspace(cp_kernel, basis=subspace)
 
-    genmat = generators(gauss_eigvals).to_matrices()
-    proj_gen = np.einsum('ij,gik,kl->gjl', subspace.conjugate(), genmat[3:], subspace)
-    diagonalizer = sbd_fast(proj_gen, hermitian=True)
+    if diagonalize:
+        genmat = generators(gauss_eigvals).to_matrices()
+        proj_gen = npmod.einsum('ij,gik,kl->gjl', subspace.conjugate(), genmat[3:], subspace)
+        diagonalizer = sbd_fast(proj_gen, hermitian=True, npmod=npmod)
+        subspace = subspace @ diagonalizer
 
-    return subspace @ diagonalizer
+    return subspace

@@ -78,7 +78,16 @@ def make_cost_fn(generators, num_layers):
     return fn
 
 
-def vqe(cost_fn, initial_state, hamiltonian, param_init, maxiter, stepsize=0., print_every=100):
+def vqe(
+    cost_fn,
+    initial_state,
+    hamiltonian,
+    param_init,
+    maxiter,
+    tol=1.e-4,
+    stepsize=0.,
+    print_every=100
+):
     solver = jaxopt.GradientDescent(fun=cost_fn, stepsize=stepsize, acceleration=False)
     update = jax.pmap(
         jax.jit(
@@ -117,5 +126,7 @@ def vqe(cost_fn, initial_state, hamiltonian, param_init, maxiter, stepsize=0., p
         parameters[:, istep + 1, :] = params.reshape(num_instances, num_params)
         if print_every > 0 and istep % print_every == 0:
             LOG.info('Iteration: %d, elapsed time: %.2f seconds', istep, time.time() - start_time)
+        if np.max(np.abs(np.diff(parameters[:, istep:istep + 2], axis=1))) < tol:
+            break
 
-    return energies, parameters
+    return energies[:, :istep], parameters[:, :istep]
