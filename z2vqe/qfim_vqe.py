@@ -10,19 +10,14 @@ LOG = logging.getLogger(__name__)
 
 
 def make_ansatz_layer_fn(generators):
-    diagonals = np.diagonal(generators, axis1=1, axis2=2)
-    diagmat = np.zeros_like(generators)
-    dim = generators.shape[1]
-    diagmat[:, np.arange(dim), np.arange(dim)] = diagonals
-    is_diagonal = np.all(np.isclose(generators, diagmat), axis=(1, 2))
+    evals, evecs = jnp.linalg.eigh(-1.j * generators)
 
     @jax.jit
     def fn(params, state):
-        for igen, generator in enumerate(generators):
-            if is_diagonal[igen]:
-                state *= jnp.exp(-0.5j * params[igen] * diagonals[igen])
-            else:
-                state = jax.scipy.linalg.expm(-0.5j * params[igen] * generator) @ state
+        for igen in range(generators.shape[0]):
+            state = evecs[igen].conjugate().T @ state
+            state *= jnp.exp(-0.5j * params[igen] * evals[igen])
+            state = evecs[igen] @ state
 
         return state
 
@@ -35,12 +30,12 @@ def make_ansatz_fn(generators, num_layers):
     @jax.jit
     def apply_layer(ilayer, args):
         params, state = args
-        layer_params = params.reshape((-1, generators.shape[0]))[ilayer]
-        state = layer_fn(layer_params, state)
+        state = layer_fn(params[ilayer], state)
         return (params, state)
 
     @jax.jit
     def fn(params, initial_state):
+        params = params.reshape((num_layers, generators.shape[0]))
         _, state = jax.lax.fori_loop(0, num_layers, apply_layer, (params, initial_state))
         return state
 
@@ -85,6 +80,7 @@ def vqe(
     param_init,
     maxiter,
     tol=1.e-4,
+    target=-np.inf,
     stepsize=0.,
     print_every=100
 ):
@@ -122,11 +118,12 @@ def vqe(
     start_time = time.time()
     for istep in range(maxiter):
         params, state = update(params, state, initial_state, hamiltonian)
-        energies[:, istep + 1] = value(params, initial_state, hamiltonian).reshape(num_instances)
+        energy = value(params, initial_state, hamiltonian).reshape(num_instances)
+        energies[:, istep + 1] = energy
         parameters[:, istep + 1, :] = params.reshape(num_instances, num_params)
         if print_every > 0 and istep % print_every == 0:
             LOG.info('Iteration: %d, elapsed time: %.2f seconds', istep, time.time() - start_time)
-        if np.max(np.abs(np.diff(parameters[:, istep:istep + 2], axis=1))) < tol:
+        if energy < target or np.max(np.abs(np.diff(parameters[:, istep:istep + 2], axis=1))) < tol:
             break
 
     return energies[:, :istep], parameters[:, :istep]
