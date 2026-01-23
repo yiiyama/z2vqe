@@ -1,7 +1,12 @@
 """Construct and project the generators."""
+
+import os
+from pathlib import Path
+import logging
 from functools import partial
 import numpy as np
 from scipy.sparse import csc_array
+import h5py
 import jax
 import jax.numpy as jnp
 from fastdla.generators.z2lgt_physical_hva import (
@@ -85,12 +90,23 @@ def get_generators(config, gauss_eigvals):
     return gen_mat, u1_eigenidx, subspace
 
 
+def main(config, num_fermions, out_dir, log_level):
+    logging.basicConfig(level=getattr(logging, log_level.upper()))
+
+    jax.config.update('jax_enable_x64', True)
+
+    gen_mat, u1_eigenidx, subspace = get_generators(config, [1, -1] * num_fermions)
+
+    out_dir = Path(out_dir or '.')
+    filename = f'generators-{config}-{num_fermions}.h5'
+    with h5py.File(out_dir / filename, 'w', libver='latest') as out:
+        out.create_dataset('hva_gen_proj', data=gen_mat)
+        out.create_dataset('u1_eigenidx', data=u1_eigenidx)
+        out.create_dataset('subspace', data=subspace)
+
+
 if __name__ == '__main__':
-    import os
     from argparse import ArgumentParser
-    from pathlib import Path
-    import logging
-    import h5py
 
     parser = ArgumentParser()
     parser.add_argument('config')
@@ -100,16 +116,7 @@ if __name__ == '__main__':
     parser.add_argument('--log-level', default='warning')
     options = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, options.log_level.upper()))
     if options.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = options.gpu
-    jax.config.update('jax_enable_x64', True)
 
-    generators, u1idx, proj = get_generators(options.config, [1, -1] * options.num_fermions)
-
-    out_dir = Path(options.out_dir or '.')
-    filename = f'generators-{options.config}-{options.num_fermions}.h5'
-    with h5py.File(out_dir / filename, 'w', libver='latest') as out:
-        out.create_dataset('hva_gen_proj', data=generators)
-        out.create_dataset('u1_eigenidx', data=u1idx)
-        out.create_dataset('subspace', data=proj)
+    main(options.config, options.num_fermions, options.out_dir, options.log_level)

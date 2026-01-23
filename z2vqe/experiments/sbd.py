@@ -1,5 +1,8 @@
 """Perform simultaneous block diagonalization of the HVA generators."""
+from pathlib import Path
+import logging
 import numpy as np
+import h5py
 from fastdla.linalg.block_diagonalization import sbd_fast
 
 
@@ -9,11 +12,25 @@ def block_diagonalize(generators_herm, npmod=np):
     return tr, blocks
 
 
+def main(config, num_fermions, out_dir, log_level):
+    logging.basicConfig(level=getattr(logging, log_level.upper()))
+
+    out_dir = Path(out_dir or '.')
+    filename = f'generators-{config}-{num_fermions}.h5'
+    with h5py.File(out_dir / filename, 'r', libver='latest') as source:
+        generators = source['hva_gen_proj'][()]
+
+    transform, blocks = block_diagonalize(generators)
+
+    filename = f'sbd-{config}-{num_fermions}.h5'
+    with h5py.File(out_dir / filename, 'w', libver='latest') as out:
+        out.create_dataset('transform', data=transform)
+        for iblock, block in enumerate(blocks):
+            out.create_dataset(f'block{iblock}', data=block)
+
+
 if __name__ == '__main__':
     from argparse import ArgumentParser
-    from pathlib import Path
-    import logging
-    import h5py
 
     parser = ArgumentParser()
     parser.add_argument('config')
@@ -22,17 +39,4 @@ if __name__ == '__main__':
     parser.add_argument('--log-level', default='warning')
     options = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, options.log_level.upper()))
-
-    out_dir = Path(options.out_dir or '.')
-    filename = f'generators-{options.config}-{options.num_fermions}.h5'
-    with h5py.File(out_dir / filename, 'r', libver='latest') as source:
-        generators = source['hva_gen_proj'][()]
-
-    transform, diag_blocks = block_diagonalize(generators)
-
-    filename = f'sbd-{options.config}-{options.num_fermions}.h5'
-    with h5py.File(out_dir / filename, 'w', libver='latest') as out:
-        out.create_dataset('transform', data=transform)
-        for iblock, block in enumerate(diag_blocks):
-            out.create_dataset(f'block{iblock}', data=block)
+    main(options.config, options.num_fermions, options.out_dir, options.log_level)

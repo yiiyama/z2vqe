@@ -1,5 +1,9 @@
 """Perform VQE."""
+import os
+from pathlib import Path
+import logging
 import numpy as np
+import h5py
 import jax
 import jax.numpy as jnp
 from z2vqe.qfim_vqe import make_cost_fn, vqe
@@ -34,12 +38,34 @@ def perform_vqe(generators, ham_terms, subspace, num_layers, instances_per_devic
     return energies, exact_e0
 
 
+def main(config, num_fermions, out_dir, log_level):
+    logging.basicConfig(level=getattr(logging, log_level.upper()))
+    jax.config.update('jax_enable_x64', True)
+
+    out_dir = Path(out_dir or '.')
+    filename = f'generators-{config}-{num_fermions}.h5'
+    with h5py.File(out_dir / filename, 'r', libver='latest') as source:
+        hva_gens = -1.j * source['hva_gen_proj'][()]
+        subspace_proj = source['subspace'][()]
+
+    filename = f'generators-gsp_msp_hsp-{num_fermions}.h5'
+    with h5py.File(out_dir / filename, 'r', libver='latest') as source:
+        hamiltonian_terms = source['hva_gen_proj'][()]
+
+    filename = f'qfim-{config}-{num_fermions}.h5'
+    with h5py.File(out_dir / filename, 'r', libver='latest') as source:
+        nl = source['ranks'].shape[0] + 5  # pylint: disable=no-member
+
+    losses, minimum = perform_vqe(hva_gens, hamiltonian_terms, subspace_proj, nl, 64)
+
+    filename = f'vqe-{config}-{num_fermions}.h5'
+    with h5py.File(out_dir / filename, 'w', libver='latest') as out:
+        out.create_dataset('energies', data=losses)
+        out.create_dataset('e0_exact', data=minimum)
+
+
 if __name__ == '__main__':
-    import os
     from argparse import ArgumentParser
-    from pathlib import Path
-    import logging
-    import h5py
 
     parser = ArgumentParser()
     parser.add_argument('config')
@@ -49,28 +75,7 @@ if __name__ == '__main__':
     parser.add_argument('--log-level', default='warning')
     options = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, options.log_level.upper()))
     if options.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = options.gpu
-    jax.config.update('jax_enable_x64', True)
 
-    out_dir = Path(options.out_dir or '.')
-    filename = f'generators-{options.config}-{options.num_fermions}.h5'
-    with h5py.File(out_dir / filename, 'r', libver='latest') as source:
-        hva_gens = -1.j * source['hva_gen_proj'][()]
-        subspace_proj = source['subspace'][()]
-
-    filename = f'generators-gsp_msp_hsp-{options.num_fermions}.h5'
-    with h5py.File(out_dir / filename, 'r', libver='latest') as source:
-        hamiltonian_terms = source['hva_gen_proj'][()]
-
-    filename = f'qfim-{options.config}-{options.num_fermions}.h5'
-    with h5py.File(out_dir / filename, 'r', libver='latest') as source:
-        nl = source['ranks'].shape[0] + 5  # pylint: disable=no-member
-
-    losses, minimum = perform_vqe(hva_gens, hamiltonian_terms, subspace_proj, nl, 64)
-
-    filename = f'vqe-{options.config}-{options.num_fermions}.h5'
-    with h5py.File(out_dir / filename, 'w', libver='latest') as out:
-        out.create_dataset('energies', data=losses)
-        out.create_dataset('e0_exact', data=minimum)
+    main(options.config, options.num_fermions, options.out_dir, options.log_level)
