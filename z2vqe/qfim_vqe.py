@@ -85,24 +85,20 @@ def vqe(
     print_every=100
 ):
     solver = jaxopt.GradientDescent(fun=cost_fn, stepsize=stepsize, acceleration=False)
-    update = jax.pmap(
-        jax.jit(
-            jax.vmap(solver.update, in_axes=(0, 0, None, None))
-        ),
-        in_axes=(0, 0, None, None)
-    )
-    value = jax.pmap(
-        jax.jit(
-            jax.vmap(cost_fn, in_axes=(0, None, None))
-        ),
-        in_axes=(0, None, None)
-    )
+    update = jax.jit(jax.vmap(solver.update, in_axes=(0, 0, None, None)))
+    value = jax.jit(jax.vmap(cost_fn, in_axes=(0, None, None)))
+    init_state = jax.jit(jax.vmap(solver.init_state))
+    num_dev = jax.device_count()
+    if num_dev > 1:
+        update = jax.pmap(update, in_axes=(0, 0, None, None))
+        value = jax.pmap(value, in_axes=(0, None, None))
+        init_state = jax.pmap(init_state)
 
     num_params = param_init.shape[-1]
     num_instances = np.prod(param_init.shape[:-1])
 
     params = jnp.array(param_init)
-    state = jax.pmap(jax.jit(jax.vmap(solver.init_state)))(params)
+    state = init_state(params)
 
     energies = np.empty((num_instances, maxiter + 1))
     parameters = np.empty((num_instances, maxiter + 1, num_params))
@@ -127,3 +123,39 @@ def vqe(
             break
 
     return energies[:, :istep], parameters[:, :istep]
+
+
+def qfim_saturation(
+    generators,
+    initial_state,
+    points_per_device,
+    nl_init=1,
+    nl_increment=1,
+    seed=0
+):
+    rng = np.random.default_rng(seed=seed)
+    ranks = []
+    num_layer = nl_init
+    num_dev = jax.device_count()
+    while True:
+        qfim_fn = make_qfim_fn(generators, num_layer)
+        num_params = num_layer * generators.shape[0]
+        if num_dev > 1:
+            qfim_fn = jax.pmap(
+                jax.jit(
+                    jax.vmap(qfim_fn, in_axes=(0, None))
+                ),
+                in_axes=(0, None)
+            )
+            shape = (num_dev, points_per_device, num_params)
+        else:
+            shape = (points_per_device, num_params)
+
+        params = rng.uniform(0., np.inf, size=shape)
+        matrices = qfim_fn(params, initial_state).reshape((-1, num_params, num_params))
+        ranks.append(np.linalg.matrix_rank(matrices, tol=1.e-10, hermitian=True))
+        if num_layer > 1 and np.isclose(np.mean(ranks[-1]), np.mean(ranks[-2])):
+            break
+        num_layer += nl_increment
+
+    return np.array(ranks)
