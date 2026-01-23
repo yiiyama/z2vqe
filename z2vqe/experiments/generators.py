@@ -36,9 +36,9 @@ def clean_array(arr, tol=1.e-12, npmod=np):
 
 @jax.jit
 def validate_symmetry(gen, subspace):
-    """Check commutation between a Hermitian generator and a subspace projector."""
-    pg = subspace @ (subspace.conjugate().T @ gen)
-    return jnp.allclose(pg - pg.conjugate().T, 0.)
+    """Check commutation between a real symmetric generator and a real symmetric projector."""
+    pg = subspace @ (subspace.T @ gen)
+    return jnp.allclose(pg, pg.T)
 
 
 def get_generators(config, gauss_eigvals):
@@ -72,7 +72,7 @@ def get_generators(config, gauss_eigvals):
     ngen = gen_mat.shape[0]
     print('generators:', ngen)
 
-    subspace = z2lgt_physical_symmetry_eigenspace(gauss_eigvals, npmod=jnp, **qnums)
+    subspace = z2lgt_physical_symmetry_eigenspace(gauss_eigvals, npmod=jnp, **qnums).real
     subspace = subspace[u1_eigenidx]
     subdim = subspace.shape[1]
     print('subspace:', subdim)
@@ -84,7 +84,7 @@ def get_generators(config, gauss_eigvals):
     trace = jnp.trace(gen_mat, axis1=1, axis2=2)
     print('trace:', trace)
     if jnp.allclose(trace, 0., atol=1.e-11):
-        norm_eye = jnp.eye(subdim, dtype=np.complex128) / subdim
+        norm_eye = jnp.eye(subdim, dtype=gen_mat.dtype) / subdim
         gen_mat -= jnp.tile(norm_eye[None, ...], (ngen, 1, 1)) * trace[:, None, None]
 
     return gen_mat, u1_eigenidx, subspace
