@@ -7,8 +7,8 @@ comm = MPI.COMM_WORLD
 
 parser = ArgumentParser()
 parser.add_argument('experiment')
-parser.add_argument('config', nargs='+')
-parser.add_argument('num_fermions', type=int, nargs='+')
+parser.add_argument('--config', nargs='+')
+parser.add_argument('--num-fermions', type=int, nargs='+')
 parser.add_argument('--out-dir')
 parser.add_argument('--log-level', default='warning')
 options = parser.parse_args()
