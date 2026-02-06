@@ -63,12 +63,6 @@ def project_su2_rep(num_fermions, u1_eigenidx, subspace, hgen_mat):
     return subspace @ basis.T, basis @ hgen_mat @ basis.T
 
 
-def eigvecs_full(num_fermions, u1_eigenidx, subspace):
-    eigvecs = np.empty((2 ** (2 * num_fermions), subspace.shape[1]), dtype=np.complex128)
-    eigvecs[u1_eigenidx] = subspace
-    return eigvecs
-
-
 def get_generators(config, gauss_eigvals):
     combinations, qnums = CONFIGS[config]
     genops = z2lgt_physical_hva_generators(gauss_eigvals, gauge_op='Z')
@@ -123,10 +117,13 @@ def get_generators(config, gauss_eigvals):
         norm_eye = jnp.eye(subdim, dtype=hgen_mat.dtype) / subdim
         hgen_mat -= jnp.tile(norm_eye[None, ...], (ngen, 1, 1)) * trace[:, None, None]
 
+    subspace_full = np.zeros((2 ** len(gauss_eigvals), subspace.shape[1]))
+    subspace_full[u1_eigenidx] = subspace
+
     hamiltonian = subspace.T @ hamiltonian @ subspace
     hamiltonian = clean_array(hamiltonian, npmod=jnp)
 
-    return hgen_mat, u1_eigenidx, subspace, hamiltonian
+    return hgen_mat, subspace_full, hamiltonian
 
 
 def main(config, num_fermions, out_dir, log_level):
@@ -134,13 +131,12 @@ def main(config, num_fermions, out_dir, log_level):
 
     jax.config.update('jax_enable_x64', True)
 
-    gen_mat, u1_eigenidx, subspace, hamiltonian = get_generators(config, [1, -1] * num_fermions)
+    gen_mat, subspace, hamiltonian = get_generators(config, [1, -1] * num_fermions)
 
     out_dir = Path(out_dir or '.')
     filename = f'generators-{config}-{num_fermions}.h5'
     with h5py.File(out_dir / filename, 'w', libver='latest') as out:
         out.create_dataset('hva_gen_proj', data=gen_mat)
-        out.create_dataset('u1_eigenidx', data=u1_eigenidx)
         out.create_dataset('subspace', data=subspace)
         out.create_dataset('hamiltonian', data=hamiltonian)
 
