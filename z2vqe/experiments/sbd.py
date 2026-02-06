@@ -7,8 +7,8 @@ import h5py
 from fastdla.algorithms.block_diagonalization import sbd_fast
 
 
-def block_diagonalize(generators_herm, orth_cutoff=1.e-08):
-    tr, blocks = sbd_fast(generators_herm, hermitian=True, return_blocks=True,
+def block_diagonalize(generators, orth_cutoff=1.e-08):
+    tr, blocks = sbd_fast(generators, hermitian=True, return_blocks=True,
                           orth_cutoff=orth_cutoff)
     print('blocks:', [block.shape[1] for block in blocks])
     return tr, blocks
@@ -22,7 +22,7 @@ def main(config, num_fermions, out_dir, log_level):
     out_dir = Path(out_dir or '.')
     filename = f'generators-{config}-{num_fermions}.h5'
     with h5py.File(out_dir / filename, 'r', libver='latest') as source:
-        generators = source['hva_gen_proj'][()]
+        generators = source['gen_mats'][()]
 
     transform, blocks = block_diagonalize(generators, orth_cutoff=1.e-4)
 

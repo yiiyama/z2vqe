@@ -10,12 +10,21 @@ from z2vqe.qfim_vqe import qfim_saturation
 
 def compute_qfim_rank(generators, subspace, points_per_device):
     initial_state = np.zeros(subspace.shape[0], dtype=np.complex128)
-    initial_state[0] = 1.
+    initial_state[[0, -1]] = np.sqrt(0.5)
     initial_state = subspace.conjugate().T @ initial_state
 
-    ranks = qfim_saturation(generators, initial_state, points_per_device)
-    print('QFIM:', ranks[-1])
-    return ranks
+    ranks, num_layers = qfim_saturation(generators, initial_state, points_per_device)
+    rsat, lcritical = get_rsat_lcritical(ranks, num_layers)
+    print('QFIM:', rsat)
+    print('Lc:', lcritical)
+    return ranks, num_layers
+
+
+def get_rsat_lcritical(ranks, num_layers):
+    mean_ranks = np.mean(ranks, axis=1)
+    rsat = mean_ranks[-1]
+    lcritical = num_layers[np.nonzero(np.isclose(mean_ranks, rsat))[0][0]]
+    return rsat, lcritical
 
 
 def main(config, num_fermions, out_dir, log_level):
@@ -25,14 +34,15 @@ def main(config, num_fermions, out_dir, log_level):
     out_dir = Path(out_dir or '.')
     filename = f'generators-{config}-{num_fermions}.h5'
     with h5py.File(out_dir / filename, 'r', libver='latest') as source:
-        hva_gens = -1.j * source['hva_gen_proj'][()]
-        subspace_proj = source['subspace'][()]
+        generators = source['gen_mats'][()]
+        subspace = source['subspace'][()]
 
-    qfim_ranks = compute_qfim_rank(hva_gens, subspace_proj, 100)
+    qfim_ranks, num_layers = compute_qfim_rank(generators, subspace, 100)
 
     filename = f'qfim-{config}-{num_fermions}.h5'
     with h5py.File(out_dir / filename, 'w', libver='latest') as out:
         out.create_dataset('ranks', data=qfim_ranks)
+        out.create_dataset('num_layers', data=num_layers)
 
 
 if __name__ == '__main__':

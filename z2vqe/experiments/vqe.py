@@ -5,29 +5,19 @@ import logging
 import numpy as np
 import h5py
 import jax
-from z2vqe.qfim_vqe import make_cost_fn, vqe
+from z2vqe.qfim_vqe import vqe
 from z2vqe.experiments.qfim import get_rsat_lcritical
 
 
-def perform_vqe(generators, hamiltonian, subspace, num_layers, instances_per_device, seed=0):
-    rng = np.random.default_rng(seed=seed)
-
+def perform_vqe(generators, num_layers, hamiltonian, subspace, instances_per_device):
     initial_state = np.zeros(subspace.shape[0], dtype=np.complex128)
     initial_state[[0, -1]] = np.sqrt(0.5)
     initial_state = subspace.conjugate().T @ initial_state
 
     exact_e0 = np.linalg.eigvalsh(hamiltonian)[0]
+    energies, _ = vqe(generators, num_layers, initial_state, hamiltonian,
+                      instances_per_device=instances_per_device, tol=0., target=exact_e0 + 1.e-6)
 
-    cost_fn = make_cost_fn(generators, num_layers)
-    num_dev = jax.device_count()
-    num_params = generators.shape[0] * num_layers
-    if num_dev > 1:
-        shape = (num_dev, instances_per_device, num_params)
-    else:
-        shape = (instances_per_device, num_params)
-    params_init = rng.uniform(0., 1.e+10, size=shape)
-    energies, _ = vqe(cost_fn, initial_state, hamiltonian, params_init, 10000, tol=0.,
-                      target=exact_e0 + 1.e-6)
     print('VQE:', energies[0, -1], '-', exact_e0, '=', energies[0, -1] - exact_e0)
     return energies, exact_e0
 
@@ -39,8 +29,8 @@ def main(config, num_fermions, out_dir, log_level):
     out_dir = Path(out_dir or '.')
     filename = f'generators-{config}-{num_fermions}.h5'
     with h5py.File(out_dir / filename, 'r', libver='latest') as source:
-        hva_gens = -1.j * source['hva_gen_proj'][()]
-        subspace_proj = source['subspace'][()]
+        generators = source['gen_mats'][()]
+        subspace = source['subspace'][()]
         hamiltonian = source['hamiltonian'][()]
 
     filename = f'qfim-{config}-{num_fermions}.h5'
@@ -49,7 +39,7 @@ def main(config, num_fermions, out_dir, log_level):
         num_layers = source['num_layers'][()]
 
     nl = get_rsat_lcritical(ranks, num_layers)[1] + 5
-    losses, minimum = perform_vqe(hva_gens, hamiltonian, subspace_proj, nl, 64)
+    losses, minimum = perform_vqe(generators, hamiltonian, subspace, nl, 64)
 
     filename = f'vqe-{config}-{num_fermions}.h5'
     with h5py.File(out_dir / filename, 'w', libver='latest') as out:
