@@ -14,7 +14,8 @@ from fastdla.generators.z2lgt_physical_hva import (
     z2lgt_physical_symmetry_eigenspace,
     z2lgt_physical_u1_charges
 )
-from z2vqe.experiments.configurations import CONFIGS
+from fastdla.algorithms.gram_schmidt import gram_schmidt
+from z2vqe.experiments.configurations import CONFIGS, MASS, COUPLING
 
 
 def _clean_array(arr, tol=1.e-12, npmod=np):
@@ -41,6 +42,33 @@ def validate_symmetry(gen, subspace):
     return jnp.allclose(pg, pg.T)
 
 
+def project_su2_rep(num_fermions, u1_eigenidx, subspace, hgen_mat):
+    init_state = np.zeros(2 ** (2 * num_fermions))
+    init_state[[0, -1]] = np.sqrt(0.5)
+    vectors = (subspace.T @ init_state[u1_eigenidx])[None, :]
+    basis = jnp.zeros((subspace.shape[1],) * 2)
+    basis, basis_size = gram_schmidt(vectors, basis=basis, basis_size=0, cutoff=1.e-6, npmod=jnp)
+    while True:
+        vectors = (hgen_mat[1] @ basis[:basis_size].T).T
+        basis, new_size = gram_schmidt(vectors, basis=basis, basis_size=basis_size, cutoff=1.e-6,
+                                       npmod=jnp)
+        vectors = (hgen_mat[0] @ basis[:new_size].T).T
+        basis, new_size = gram_schmidt(vectors, basis=basis, basis_size=new_size, cutoff=1.e-6,
+                                       npmod=jnp)
+        if new_size == basis_size:
+            break
+        basis_size = new_size
+
+    basis = basis[:basis_size]
+    return subspace @ basis.T, basis @ hgen_mat @ basis.T
+
+
+def eigvecs_full(num_fermions, u1_eigenidx, subspace):
+    eigvecs = np.empty((2 ** (2 * num_fermions), subspace.shape[1]), dtype=np.complex128)
+    eigvecs[u1_eigenidx] = subspace
+    return eigvecs
+
+
 def get_generators(config, gauss_eigvals):
     combinations, qnums = CONFIGS[config]
     genops = z2lgt_physical_hva_generators(gauss_eigvals, gauge_op='Z')
@@ -64,30 +92,41 @@ def get_generators(config, gauss_eigvals):
     shape_csc = (u1_eigenidx.shape[0], u1_eigenidx.shape[0])
     gen_spmat = [project_sparse(csc_array(project_sparse(mat, shape_csr)), shape_csc)
                  for mat in gen_spmat]
-    gen_mat = jnp.concatenate([mat.todense()[None, ...] for mat in gen_spmat])
     # Take the negative imaginary part because our Z2 LGT generators are pure imaginary
-    gen_mat = -gen_mat.imag
+    hgen_mat = jnp.concatenate([-mat.todense()[None, ...].imag for mat in gen_spmat])
+    hamiltonian = jnp.sum(hgen_mat[0:2], axis=0)
+    hamiltonian += MASS * np.sum(hgen_mat[2:4], axis=0)
+    hamiltonian += COUPLING * np.sum(hgen_mat[4:], axis=0)
 
-    gen_mat = jnp.stack([jnp.sum(gen_mat[np.array(comb)], axis=0) for comb in combinations])
-    ngen = gen_mat.shape[0]
+    hgen_mat = jnp.stack([jnp.sum(hgen_mat[np.array(comb)], axis=0) for comb in combinations])
+    ngen = hgen_mat.shape[0]
     print('generators:', ngen)
 
     subspace = z2lgt_physical_symmetry_eigenspace(gauss_eigvals, npmod=jnp, **qnums).real
     subspace = subspace[u1_eigenidx]
     subdim = subspace.shape[1]
     print('subspace:', subdim)
-    print('symmetries:', [bool(validate_symmetry(gen, subspace)) for gen in gen_mat])
+    print('symmetries:', [bool(validate_symmetry(gen, subspace)) for gen in hgen_mat])
 
-    gen_mat = jnp.einsum('ji,gjk,kl->gil', subspace.conjugate(), gen_mat, subspace)
-    gen_mat = clean_array(gen_mat, npmod=jnp)
+    hgen_mat = subspace.T @ hgen_mat @ subspace
+    hgen_mat = clean_array(hgen_mat, npmod=jnp)
 
-    trace = jnp.trace(gen_mat, axis1=1, axis2=2)
+    if config == 'm_h':
+        nf = len(gauss_eigvals) // 2
+        subspace, hgen_mat = project_su2_rep(nf, u1_eigenidx, subspace, hgen_mat)
+        subdim = subspace.shape[1]
+        print('su2 rep:', subdim)
+
+    trace = jnp.trace(hgen_mat, axis1=1, axis2=2)
     print('trace:', trace)
     if jnp.allclose(trace, 0., atol=1.e-11):
-        norm_eye = jnp.eye(subdim, dtype=gen_mat.dtype) / subdim
-        gen_mat -= jnp.tile(norm_eye[None, ...], (ngen, 1, 1)) * trace[:, None, None]
+        norm_eye = jnp.eye(subdim, dtype=hgen_mat.dtype) / subdim
+        hgen_mat -= jnp.tile(norm_eye[None, ...], (ngen, 1, 1)) * trace[:, None, None]
 
-    return gen_mat, u1_eigenidx, subspace
+    hamiltonian = subspace.T @ hamiltonian @ subspace
+    hamiltonian = clean_array(hamiltonian, npmod=jnp)
+
+    return hgen_mat, u1_eigenidx, subspace, hamiltonian
 
 
 def main(config, num_fermions, out_dir, log_level):
@@ -95,7 +134,7 @@ def main(config, num_fermions, out_dir, log_level):
 
     jax.config.update('jax_enable_x64', True)
 
-    gen_mat, u1_eigenidx, subspace = get_generators(config, [1, -1] * num_fermions)
+    gen_mat, u1_eigenidx, subspace, hamiltonian = get_generators(config, [1, -1] * num_fermions)
 
     out_dir = Path(out_dir or '.')
     filename = f'generators-{config}-{num_fermions}.h5'
@@ -103,6 +142,7 @@ def main(config, num_fermions, out_dir, log_level):
         out.create_dataset('hva_gen_proj', data=gen_mat)
         out.create_dataset('u1_eigenidx', data=u1_eigenidx)
         out.create_dataset('subspace', data=subspace)
+        out.create_dataset('hamiltonian', data=hamiltonian)
 
 
 if __name__ == '__main__':
