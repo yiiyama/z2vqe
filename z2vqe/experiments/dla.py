@@ -14,8 +14,8 @@ def compute_dla(generators_herm):  # , distributed=False, shard_template=None):
                       shard_basis=shard_basis)
 
     if shard_basis:
-        print('DLA:', dla[1].shape[0])
-        return dla[1].shape[0]
+        print('DLA:', dla[1][0].shape[0])
+        return dla[1][0].shape[0]
     #     basis, indices = dla
     #     if distributed:
     #         proc_id = jax.process_index()
