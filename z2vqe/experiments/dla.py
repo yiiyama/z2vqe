@@ -10,12 +10,12 @@ from fastdla.lie_closure import lie_closure
 
 def compute_dla(generators_herm):  # , distributed=False, shard_template=None):
     shard_basis = jax.device_count() > 1
-    dla = lie_closure(jnp.array(1.j * generators_herm), skew_hermitian=True,
-                      shard_basis=shard_basis)
+    result = lie_closure(jnp.array(1.j * generators_herm), real=True, shard_basis=shard_basis)
 
     if shard_basis:
-        print('DLA:', dla[1][0].shape[0])
-        return dla[1][0].shape[0]
+        dla_is, indices_is, dla_ra, indices_ra = result
+        print('DLA:', indices_is[0].shape[0] + indices_ra[0].shape[0])
+        return indices_is[0].shape[0] + indices_ra[0].shape[0]
     #     basis, indices = dla
     #     if distributed:
     #         proc_id = jax.process_index()
@@ -44,8 +44,9 @@ def compute_dla(generators_herm):  # , distributed=False, shard_template=None):
     #     else:
     #         dla = np.array(basis)[indices]
 
-    print('DLA:', dla.shape[0])
-    return dla.shape[0]
+    dla_is, dla_ra = result
+    print('DLA:', dla_is.shape[0] + dla_ra.shape[0])
+    return dla_is.shape[0] + dla_ra.shape[0]
 
 
 def main(config, num_fermions, out_dir, log_level):  # , distributed=False):
