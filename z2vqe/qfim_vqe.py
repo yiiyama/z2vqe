@@ -24,9 +24,10 @@ def make_ansatz_layer_fn(generators: jax.Array) -> Callable:
 
     @jax.jit
     def fn(params, state):
+        extra_dims = tuple(range(1, state.ndim))
         for igen in range(generators.shape[0]):
             state = evecs[igen].conjugate().T @ state
-            state = jnp.tensordot(jnp.exp(1.j * params[igen] * evals[igen]), state, axes=(0, 0))
+            state = jnp.expand_dims(jnp.exp(1.j * params[igen] * evals[igen]), extra_dims) * state
             state = evecs[igen] @ state
 
         return state
