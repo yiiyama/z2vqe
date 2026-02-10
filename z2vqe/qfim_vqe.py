@@ -80,10 +80,10 @@ def make_qfim_fn(generators: jax.Array, num_layers: int) -> Callable:
         psi = ansatz_fn(params, initial_state)
         # pylint: disable-next=not-callable
         dpsi = jacobian_fn(params, initial_state)
-        # <ψ|dψ> = <ψ_0|U† (-iUH~j)|ψ_0> = <ψ_0|H~j|ψ_0>  (H~j = U[0:j]† Hj U[0:j])
-        psidpsi = (psi.conjugate() @ dpsi).real
+        # <ψ|dψ> = <ψ_0|U† (-iUH~j)|ψ_0> = -i <ψ_0|H~j|ψ_0>  (H~j = U[0:j]† Hj U[0:j])
+        mim_psidpsi = (psi.conjugate() @ dpsi).imag
         qfim = jnp.tensordot(dpsi.conjugate(), dpsi, axes=(0, 0)).real
-        qfim -= jnp.outer(psidpsi, psidpsi)
+        qfim -= jnp.outer(mim_psidpsi, mim_psidpsi)
         return qfim
 
     return fn
@@ -160,7 +160,7 @@ def vqe(
         default_param_shape = (instances_per_device, num_params)
 
     if param_init is None:
-        param_init = rng.uniform(0., 1.e+10, size=default_param_shape)
+        param_init = rng.normal(0., 2. * np.pi, size=default_param_shape)
     num_instances = instances_per_device * num_dev
 
     params = jnp.array(param_init)
@@ -221,7 +221,7 @@ def qfim_saturation(
                 shape = (num_dev, points_per_device, num_params)
             else:
                 shape = (points_per_device, num_params)
-            return rng.uniform(0., 1.e+10, size=shape)
+            return rng.normal(0., 2. * np.pi, size=shape)
 
     def compute_qfim_svals(num_layer):
         LOG.info('Computing QFIM rank for ansatz with %d layers', num_layer)
