@@ -2,6 +2,7 @@
 from collections.abc import Callable
 import time
 import logging
+from functools import partial
 from typing import Optional
 import numpy as np
 import jax
@@ -62,7 +63,12 @@ def make_ansatz_fn(generators: jax.Array, num_layers: int) -> Callable:
     return fn
 
 
-def make_qfim_fn(generators: jax.Array, num_layers: int) -> Callable:
+def make_qfim_fn(
+    generators: jax.Array,
+    num_layers: int,
+    vmap: bool = False,
+    pmap: bool = False
+) -> Callable:
     """Return a function that computes the QFIM of the parametrized state.
 
     Args:
@@ -86,10 +92,20 @@ def make_qfim_fn(generators: jax.Array, num_layers: int) -> Callable:
         qfim -= jnp.outer(mim_psidpsi, mim_psidpsi)
         return qfim
 
+    if vmap:
+        fn = jax.jit(jax.vmap(fn, in_axes=(0, None)))
+    if pmap:
+        fn = jax.pmap(fn, in_axes=(0, None))
+
     return fn
 
 
-def make_cost_fn(generators: jax.Array, num_layers: int) -> Callable:
+def make_cost_fn(
+    generators: jax.Array,
+    num_layers: int,
+    vmap: bool = False,
+    pmap: bool = False
+) -> Callable:
     """Return a function that computes the energy expectation value of a parametrized state.
 
     Args:
@@ -107,6 +123,32 @@ def make_cost_fn(generators: jax.Array, num_layers: int) -> Callable:
         energy = (state.conjugate() @ hamiltonian @ state).real
         return energy
 
+    if vmap:
+        fn = jax.jit(jax.vmap(fn, in_axes=(0, None, None)))
+    if pmap:
+        fn = jax.pmap(fn, in_axes=(0, None, None))
+
+    return fn
+
+
+def make_curvature_fn(
+    cost_fn: Callable,
+    vmap: bool = False,
+    pmap: bool = False
+) -> Callable:
+    """Return a function that computes the eigenvalues of the Hessian of the cost function."""
+    hess_fn = jax.hessian(cost_fn)
+
+    @jax.jit
+    def fn(params, initial_state, hamiltonian):
+        hess = hess_fn(params, initial_state, hamiltonian)
+        return jnp.linalg.eigvalsh(hess)
+
+    if vmap:
+        fn = jax.jit(jax.vmap(fn, in_axes=(0, None, None)))
+    if pmap:
+        fn = jax.pmap(fn, in_axes=(0, None, None))
+
     return fn
 
 
@@ -116,13 +158,15 @@ def vqe(
     initial_state: jax.Array,
     hamiltonian: jax.Array,
     instances_per_device: int = 1,
-    param_init: Optional[np.ndarray] = None,
+    params: Optional[np.ndarray] = None,
     maxiter: int = 10_000,
+    stepsize: float = 0.,
+    acceleration: bool = True,
     tol: float = 1.e-4,
     target: float = -np.inf,
-    stepsize: float = 0.,
+    solve_only: bool = False,
     print_every: int = 100
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Perform VQE with an HVA.
 
     Args:
@@ -142,53 +186,121 @@ def vqe(
     Returns:
         Loss curve and the parameter history.
     """
+    cost_fn = make_cost_fn(generators, num_layers, vmap=True, pmap=jax.device_count() > 1)
+    if params is None:
+        params = random_params(generators.shape[0] * num_layers, instances_per_device)
+
+    return run_vqe(cost_fn, initial_state, hamiltonian, params, maxiter,
+                   stepsize=stepsize, acceleration=acceleration,
+                   tol=tol, target=target, solve_only=solve_only, print_every=print_every)
+
+
+def random_params(num_params, instances_per_device):
     rng = np.random.default_rng()
-    cost_fn = make_cost_fn(generators, num_layers)
-
-    solver = jaxopt.GradientDescent(fun=cost_fn, stepsize=stepsize, acceleration=False)
-    update = jax.jit(jax.vmap(solver.update, in_axes=(0, 0, None, None)))
-    value = jax.jit(jax.vmap(cost_fn, in_axes=(0, None, None)))
-    init_state = jax.jit(jax.vmap(solver.init_state))
-    num_params = generators.shape[0] * num_layers
-    num_dev = jax.device_count()
-    if num_dev > 1:
-        update = jax.pmap(update, in_axes=(0, 0, None, None))
-        value = jax.pmap(value, in_axes=(0, None, None))
-        init_state = jax.pmap(init_state)
-        default_param_shape = (num_dev, instances_per_device, num_params)
+    if (num_dev := jax.device_count()) > 1:
+        shape = (num_dev, instances_per_device, num_params)
     else:
-        default_param_shape = (instances_per_device, num_params)
+        shape = (instances_per_device, num_params)
+    return rng.normal(0., 2. * np.pi, size=shape)
 
-    if param_init is None:
-        param_init = rng.normal(0., 2. * np.pi, size=default_param_shape)
-    num_instances = instances_per_device * num_dev
 
-    params = jnp.array(param_init)
-    state = init_state(params)
+def run_vqe(
+    cost_fn,
+    initial_state,
+    hamiltonian,
+    params,
+    maxiter,
+    stepsize=0.,
+    acceleration=True,
+    tol: float = 1.e-4,
+    target: float = -np.inf,
+    return_curvature: bool = False,
+    solve_only: bool = False,
+    print_every: int = 100
+):
+    cost_fn_s = cost_fn
+    while hasattr(cost_fn_s, '__wrapped__'):
+        cost_fn_s = cost_fn_s.__wrapped__
+    solver = jaxopt.GradientDescent(fun=cost_fn_s, stepsize=stepsize, acceleration=acceleration)
+    update_fn = jax.jit(jax.vmap(solver.update, in_axes=(0, 0, None, None)))
+    init_state_fn = jax.jit(jax.vmap(solver.init_state))
+    if return_curvature:
+        curvature_fn = make_curvature_fn(cost_fn_s, vmap=True)
+
+    if jax.device_count() > 1:
+        update_fn = jax.pmap(update_fn, in_axes=(0, 0, None, None))
+        init_state_fn = jax.pmap(init_state_fn)
+        if return_curvature:
+            curvature_fn = jax.pmap(curvature_fn, in_axes=(0, None, None))
+
+    num_instances = np.prod(params.shape[:-1])
+    num_params = params.shape[-1]
+    params = jnp.array(params)
+    state = init_state_fn(params)
 
     energies = np.empty((num_instances, maxiter + 1))
     parameters = np.empty((num_instances, maxiter + 1, num_params))
+    stepsizes = np.empty((num_instances, maxiter))
+    if return_curvature:
+        curvatures = np.empty((num_instances, maxiter + 1, num_params))
 
+    if not solve_only:
+        LOG.info('Computing initial loss values')
+        energies[:, 0] = cost_fn(params, initial_state, hamiltonian).reshape(num_instances)
+        parameters[:, 0, :] = params.reshape(num_instances, num_params)
+        if return_curvature:
+            curvature = curvature_fn(params, initial_state, hamiltonian)
+            curvatures[:, 0, :] = curvature.reshape((num_instances, num_params))
+
+    LOG.info('Minimization start')
     start_time = time.time()
-    LOG.info('Compiling the cost function..')
-    energies[:, 0] = value(params, initial_state, hamiltonian).reshape(num_instances)
-    update(params, state, initial_state, hamiltonian)  # pylint: disable=not-callable
-    LOG.info('Compilation of the cost function took %.2f seconds', time.time() - start_time)
-
-    parameters[:, 0, :] = params.reshape(num_instances, num_params)
-
-    start_time = time.time()
-    for istep in range(maxiter):
-        params, state = update(params, state, initial_state, hamiltonian)
-        energy = value(params, initial_state, hamiltonian).reshape(num_instances)
-        energies[:, istep + 1] = energy
-        parameters[:, istep + 1, :] = params.reshape(num_instances, num_params)
+    for istep in range(1, maxiter + 1):
+        params, state = update_fn(params, state, initial_state, hamiltonian)
+        stepsizes[:, istep - 1] = state.stepsize.reshape(num_instances)
+        if not solve_only:
+            energy = cost_fn(params, initial_state, hamiltonian).reshape(num_instances)
+            energies[:, istep] = energy
+            parameters[:, istep, :] = params.reshape(num_instances, num_params)
+            if return_curvature:
+                curvature = curvature_fn(params, initial_state, hamiltonian)
+                curvatures[:, istep, :] = curvature.reshape((num_instances, num_params))
         if print_every > 0 and istep % print_every == 0:
             LOG.info('Iteration: %d, elapsed time: %.2f seconds', istep, time.time() - start_time)
-        if energy < target or np.max(np.abs(np.diff(parameters[:, istep:istep + 2], axis=1))) < tol:
+        if tol > 0. and np.max(np.abs(np.diff(parameters[:, istep - 1:istep + 1], axis=1))) < tol:
+            break
+        if not solve_only and np.max(energy) < target:
             break
 
-    return energies[:, :istep], parameters[:, :istep]
+    retval = (energies[:, :istep + 1], parameters[:, :istep + 1], stepsizes)
+    if return_curvature:
+        return retval + (curvatures,)
+    return retval
+
+
+def compute_qfim_svals(
+    generators: jax.Array,
+    initial_state: jax.Array,
+    num_layer: int,
+    param_init_fn: Optional[Callable[[int], np.ndarray]] = None,
+    points_per_device: int = 1
+):
+    LOG.info('Computing QFIM rank for ansatz with %d layers', num_layer)
+    rng = np.random.default_rng()
+    num_dev = jax.device_count()
+
+    if param_init_fn is None:
+        def param_init_fn(num_params):
+            if num_dev > 1:
+                shape = (num_dev, points_per_device, num_params)
+            else:
+                shape = (points_per_device, num_params)
+            return rng.normal(0., 2. * np.pi, size=shape)
+
+    qfim_fn = make_qfim_fn(generators, num_layer, vmap=True, pmap=num_dev > 1)
+    num_params = num_layer * generators.shape[0]
+    params = param_init_fn(num_params)
+    matrices = qfim_fn(params, initial_state).reshape((-1, num_params, num_params))
+    return np.linalg.svd(matrices, compute_uv=False, hermitian=True)
 
 
 def qfim_saturation(
@@ -197,6 +309,7 @@ def qfim_saturation(
     points_per_device: int = 1,
     param_init_fn: Optional[Callable[[int], np.ndarray]] = None,
     tol: float = 1.e-10,
+    rtol: float = 1.e-6,
     return_svals: bool = False,
     mode: str = 'binary_search',
     **search_params
@@ -212,57 +325,28 @@ def qfim_saturation(
         return_svals: Whether to return the singular values themselves in addition to the ranks.
         mode: Search mode.
     """
-    rng = np.random.default_rng()
-    num_dev = jax.device_count()
-
-    if param_init_fn is None:
-        def param_init_fn(num_params):
-            if num_dev > 1:
-                shape = (num_dev, points_per_device, num_params)
-            else:
-                shape = (points_per_device, num_params)
-            return rng.normal(0., 2. * np.pi, size=shape)
-
-    def compute_qfim_svals(num_layer):
-        LOG.info('Computing QFIM rank for ansatz with %d layers', num_layer)
-        qfim_fn = jax.jit(
-            jax.vmap(
-                make_qfim_fn(generators, num_layer),
-                in_axes=(0, None)
-            )
-        )
-        if num_dev > 1:
-            qfim_fn = jax.pmap(qfim_fn, in_axes=(0, None))
-
-        num_params = num_layer * generators.shape[0]
-        params = param_init_fn(num_params)
-        matrices = qfim_fn(params, initial_state).reshape((-1, num_params, num_params))
-        return np.linalg.svd(matrices, compute_uv=False, hermitian=True)
-
     def rank(svals):
-        return np.count_nonzero(svals > tol, axis=1)
+        absolute = svals > tol
+        relative = np.concatenate(
+            [np.ones((svals.shape[0], 1), dtype=bool), svals[:, 1:] > rtol * svals[:, :-1]],
+            axis=1
+        )
+        return np.count_nonzero(absolute & relative, axis=1)
 
-    def compute_qfim_rank(num_layer):
-        svals = compute_qfim_svals(num_layer)
-        return rank(svals)
-
-    result_fn = compute_qfim_svals if return_svals else compute_qfim_rank
+    get_svals = partial(compute_qfim_svals, generators, initial_state,
+                        param_init_fn=param_init_fn, points_per_device=points_per_device)
 
     if mode == 'binary_search':
         LOG.info('Searching for maximum QFIM rank..')
         num_layer = search_params.get('initial_step', 16)
-        results = {num_layer: result_fn(num_layer)}
-        if return_svals:
-            ranks = {num_layer: rank(results[num_layer])}
-        else:
-            ranks = results
+        svals = {num_layer: get_svals(num_layer)}
+        ranks = {num_layer: rank(svals[num_layer])}
         initial_step = num_layer
         rsat = None
         while True:
             num_layer += initial_step
-            results[num_layer] = result_fn(num_layer)
-            if return_svals:
-                ranks[num_layer] = rank(results[num_layer])
+            svals[num_layer] = get_svals(num_layer)
+            ranks[num_layer] = rank(svals[num_layer])
             if np.isclose(np.mean(ranks[num_layer]), np.mean(ranks[num_layer - initial_step])):
                 rsat = np.mean(ranks[num_layer])
                 LOG.info('Found saturation rank %f', rsat)
@@ -279,34 +363,28 @@ def qfim_saturation(
 
         LOG.info('Moving with increments %s', increments)
         for increment in increments:
-            while True:
+            while num_layer + increment not in svals:
                 num_layer += increment
-                if num_layer in results:
-                    break
-                results[num_layer] = result_fn(num_layer)
-                if return_svals:
-                    ranks[num_layer] = rank(results[num_layer])
+                svals[num_layer] = get_svals(num_layer)
+                ranks[num_layer] = rank(svals[num_layer])
+
                 if np.isclose(np.mean(ranks[num_layer]), rsat):
                     num_layer -= increment
                     break
 
-        num_layers = sorted(results.keys())
+        num_layers = sorted(svals.keys())
         ranks = np.array([ranks[nl] for nl in num_layers])
 
     elif mode == 'scan':
         num_layer = search_params.get('nl_init', 1)
         num_layers = [num_layer]
-        results = [result_fn(num_layer)]
-        if return_svals:
-            ranks = [rank(results[0])]
-        else:
-            ranks = results
+        svals = [get_svals(num_layer)]
+        ranks = [rank(svals[0])]
         while True:
             num_layer += search_params.get('increment', 1)
             num_layers.append(num_layer)
-            results.append(result_fn(num_layer))
-            if return_svals:
-                ranks.append(rank(results[-1]))
+            svals.append(get_svals(num_layer))
+            ranks.append(rank(svals[-1]))
             if np.isclose(np.mean(ranks[-1]), np.mean(ranks[-2])):
                 break
 
@@ -314,5 +392,5 @@ def qfim_saturation(
 
     retval = (ranks, np.array(num_layers))
     if return_svals:
-        retval += (results,)
+        retval += (svals,)
     return retval
