@@ -192,7 +192,7 @@ def vqe(
 
     return run_vqe(cost_fn, initial_state, hamiltonian, params, maxiter,
                    stepsize=stepsize, acceleration=acceleration,
-                   tol=tol, target=target, solve_only=solve_only, print_every=print_every)
+                   dldtmax=tol, target=target, solve_only=solve_only, print_every=print_every)
 
 
 def random_params(num_params, instances_per_device):
@@ -212,7 +212,7 @@ def run_vqe(
     maxiter,
     stepsize=0.,
     acceleration=True,
-    tol: float = 1.e-4,
+    dldtmax: float = -1.,
     target: float = -np.inf,
     return_curvature: bool = False,
     solve_only: bool = False,
@@ -224,12 +224,16 @@ def run_vqe(
     solver = jaxopt.GradientDescent(fun=cost_fn_s, stepsize=stepsize, acceleration=acceleration)
     update_fn = jax.jit(jax.vmap(solver.update, in_axes=(0, 0, None, None)))
     init_state_fn = jax.jit(jax.vmap(solver.init_state))
+    if dldtmax > 0.:
+        grad_fn = jax.jit(jax.vmap(jax.grad(cost_fn_s), in_axes=(0, None, None)))
     if return_curvature:
         curvature_fn = make_curvature_fn(cost_fn_s, vmap=True)
 
     if jax.device_count() > 1:
         update_fn = jax.pmap(update_fn, in_axes=(0, 0, None, None))
         init_state_fn = jax.pmap(init_state_fn)
+        if dldtmax > 0.:
+            grad_fn = jax.pmap(grad_fn, in_axes=(0, None, None))
         if return_curvature:
             curvature_fn = jax.pmap(curvature_fn, in_axes=(0, None, None))
 
@@ -266,8 +270,12 @@ def run_vqe(
                 curvatures[:, istep, :] = curvature.reshape((num_instances, num_params))
         if print_every > 0 and istep % print_every == 0:
             LOG.info('Iteration: %d, elapsed time: %.2f seconds', istep, time.time() - start_time)
-        if tol > 0. and np.max(np.abs(np.diff(parameters[:, istep - 1:istep + 1], axis=1))) < tol:
-            break
+        # pylint: disable-next=possibly-used-before-assignment
+        if dldtmax > 0.:
+            grad = grad_fn(params, initial_state, hamiltonian).reshape((num_instances, num_params))
+            dldt = jnp.sum(jnp.square(grad), axis=1)
+            if np.mean(dldt) < dldtmax:
+                break
         if not solve_only and np.max(energy) < target:
             break
 
