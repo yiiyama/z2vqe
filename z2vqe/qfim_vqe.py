@@ -64,8 +64,9 @@ def make_ansatz_fn(generators: jax.Array, num_layers: int) -> Callable:
 
 
 def make_qfim_fn(
-    generators: jax.Array,
-    num_layers: int,
+    generators: Optional[jax.Array] = None,
+    num_layers: Optional[int] = None,
+    ansatz_fn: Optional[Callable] = None,
     vmap: bool = False,
     pmap: bool = False
 ) -> Callable:
@@ -78,7 +79,8 @@ def make_qfim_fn(
     Returns:
         QFIM function.
     """
-    ansatz_fn = make_ansatz_fn(generators, num_layers)
+    if ansatz_fn is None:
+        ansatz_fn = make_ansatz_fn(generators, num_layers)
     jacobian_fn = jax.jit(jax.jacfwd(ansatz_fn))
 
     @jax.jit
@@ -101,8 +103,10 @@ def make_qfim_fn(
 
 
 def make_cost_fn(
-    generators: jax.Array,
-    num_layers: int,
+    generators: Optional[jax.Array] = None,
+    num_layers: Optional[int] = None,
+    ansatz_fn: Optional[Callable] = None,
+    with_grad: bool = False,
     vmap: bool = False,
     pmap: bool = False
 ) -> Callable:
@@ -115,7 +119,8 @@ def make_cost_fn(
     Returns:
         Energy function.
     """
-    ansatz_fn = make_ansatz_fn(generators, num_layers)
+    if ansatz_fn is None:
+        ansatz_fn = make_ansatz_fn(generators, num_layers)
 
     @jax.jit
     def fn(params, initial_state, hamiltonian):
@@ -123,11 +128,20 @@ def make_cost_fn(
         energy = (state.conjugate() @ hamiltonian @ state).real
         return energy
 
+    if with_grad:
+        grad = jax.grad(fn)
+
     if vmap:
         fn = jax.jit(jax.vmap(fn, in_axes=(0, None, None)))
+        if with_grad:
+            grad = jax.jit(jax.vmap(grad, in_axes=(0, None, None)))
     if pmap:
         fn = jax.pmap(fn, in_axes=(0, None, None))
+        if with_grad:
+            grad = jax.pmap(grad, in_axes=(0, None, None))
 
+    if with_grad:
+        return fn, grad
     return fn
 
 
@@ -293,22 +307,29 @@ def compute_qfim_svals(
     points_per_device: int = 1
 ):
     LOG.info('Computing QFIM rank for ansatz with %d layers', num_layer)
-    rng = np.random.default_rng()
-    num_dev = jax.device_count()
 
     if param_init_fn is None:
-        def param_init_fn(num_params):
-            if num_dev > 1:
-                shape = (num_dev, points_per_device, num_params)
-            else:
-                shape = (points_per_device, num_params)
-            return rng.normal(0., 2. * np.pi, size=shape)
+        param_init_fn = partial(random_params, instances_per_device=points_per_device)
 
-    qfim_fn = make_qfim_fn(generators, num_layer, vmap=True, pmap=num_dev > 1)
+    qfim_fn = make_qfim_fn(generators, num_layer, vmap=True, pmap=jax.device_count() > 1)
     num_params = num_layer * generators.shape[0]
     params = param_init_fn(num_params)
     matrices = qfim_fn(params, initial_state).reshape((-1, num_params, num_params))
     return np.linalg.svd(matrices, compute_uv=False, hermitian=True)
+
+
+def qfim_rank(
+    svals: np.ndarray,
+    atol: float,
+    rtol: float,
+    npmod=np
+) -> int:
+    absolute = svals > atol
+    relative = npmod.concatenate(
+        [npmod.ones((svals.shape[0], 1), dtype=bool), svals[:, 1:] > rtol * svals[:, :-1]],
+        axis=1
+    )
+    return npmod.count_nonzero(absolute & relative, axis=1)
 
 
 def qfim_saturation(
@@ -333,28 +354,21 @@ def qfim_saturation(
         return_svals: Whether to return the singular values themselves in addition to the ranks.
         mode: Search mode.
     """
-    def rank(svals):
-        absolute = svals > tol
-        relative = np.concatenate(
-            [np.ones((svals.shape[0], 1), dtype=bool), svals[:, 1:] > rtol * svals[:, :-1]],
-            axis=1
-        )
-        return np.count_nonzero(absolute & relative, axis=1)
-
     get_svals = partial(compute_qfim_svals, generators, initial_state,
                         param_init_fn=param_init_fn, points_per_device=points_per_device)
+    get_rank = partial(qfim_rank, atol=tol, rtol=rtol)
 
     if mode == 'binary_search':
         LOG.info('Searching for maximum QFIM rank..')
         num_layer = search_params.get('initial_step', 16)
         svals = {num_layer: get_svals(num_layer)}
-        ranks = {num_layer: rank(svals[num_layer])}
+        ranks = {num_layer: get_rank(svals[num_layer])}
         initial_step = num_layer
         rsat = None
         while True:
             num_layer += initial_step
             svals[num_layer] = get_svals(num_layer)
-            ranks[num_layer] = rank(svals[num_layer])
+            ranks[num_layer] = get_rank(svals[num_layer])
             if np.isclose(np.mean(ranks[num_layer]), np.mean(ranks[num_layer - initial_step])):
                 rsat = np.mean(ranks[num_layer])
                 LOG.info('Found saturation rank %f', rsat)
@@ -374,7 +388,7 @@ def qfim_saturation(
             while num_layer + increment not in svals:
                 num_layer += increment
                 svals[num_layer] = get_svals(num_layer)
-                ranks[num_layer] = rank(svals[num_layer])
+                ranks[num_layer] = get_rank(svals[num_layer])
 
                 if np.isclose(np.mean(ranks[num_layer]), rsat):
                     num_layer -= increment
@@ -387,12 +401,12 @@ def qfim_saturation(
         num_layer = search_params.get('nl_init', 1)
         num_layers = [num_layer]
         svals = [get_svals(num_layer)]
-        ranks = [rank(svals[0])]
+        ranks = [get_rank(svals[0])]
         while True:
             num_layer += search_params.get('increment', 1)
             num_layers.append(num_layer)
             svals.append(get_svals(num_layer))
-            ranks.append(rank(svals[-1]))
+            ranks.append(get_rank(svals[-1]))
             if np.isclose(np.mean(ranks[-1]), np.mean(ranks[-2])):
                 break
 
