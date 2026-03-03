@@ -195,8 +195,8 @@ def vqe(
                    dldtmax=tol, target=target, solve_only=solve_only, print_every=print_every)
 
 
-def random_params(num_params, instances_per_device):
-    rng = np.random.default_rng()
+def random_params(num_params, instances_per_device, seed=12345):
+    rng = np.random.default_rng(seed=seed)
     if (num_dev := jax.device_count()) > 1:
         shape = (num_dev, instances_per_device, num_params)
     else:
