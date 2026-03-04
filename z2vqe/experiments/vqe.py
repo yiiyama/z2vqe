@@ -13,7 +13,7 @@ from z2vqe.experiments.qfim import get_rsat_lcritical
 LOG = logging.getLogger(__name__)
 
 
-def compute_qfim_vqe(generators, nls, hamiltonian, subspace, num_instances, acceleration):
+def compute_qfim_vqe(generators, nls, hamiltonian, subspace, num_instances, maxiter, acceleration):
     points_per_device = num_instances // jax.device_count()
 
     initial_state = np.zeros(subspace.shape[0], dtype=np.complex128)
@@ -49,16 +49,16 @@ def compute_qfim_vqe(generators, nls, hamiltonian, subspace, num_instances, acce
         qfim_ranks[inl] = get_qfim_rank(init_params, initial_state)
         gradients[inl] = get_dldt(init_params, initial_state, hamiltonian)
         if acceleration:
-            energies = run_vqe(cost_fn, initial_state, hamiltonian, init_params, 200)[0]
+            energies = run_vqe(cost_fn, initial_state, hamiltonian, init_params, maxiter)[0]
         else:
-            energies = run_vqe(cost_fn, initial_state, hamiltonian, init_params, 2000,
+            energies = run_vqe(cost_fn, initial_state, hamiltonian, init_params, maxiter,
                                stepsize=1.e-4, acceleration=False)[0]
         losses[inl] = energies[:, -1]
 
     return qfim_ranks, gradients, losses
 
 
-def main(config, num_fermions, num_instances, out_dir, log_level):
+def main(config, num_fermions, num_instances, maxiter, out_dir, log_level):
     logging.basicConfig(level=getattr(logging, log_level.upper()))
     jax.config.update('jax_enable_x64', True)
 
@@ -83,8 +83,13 @@ def main(config, num_fermions, num_instances, out_dir, log_level):
     print(lcr, nlstep, nls)
     filename = f'vqe-{config}-{num_fermions}.h5'
 
+    acceleration = num_fermions != 2
+    if not acceleration:
+        maxiter *= 10
+
     ranks, gradients, losses = compute_qfim_vqe(generators, nls, hamiltonian, subspace,
-                                                num_instances, acceleration=num_fermions != 2)
+                                                num_instances, maxiter=maxiter,
+                                                acceleration=acceleration)
 
     with h5py.File(out_dir / filename, 'w', libver='latest') as out:
         out.create_dataset('num_layers', data=nls)
@@ -101,6 +106,7 @@ if __name__ == '__main__':
     parser.add_argument('num_fermions', type=int)
     parser.add_argument('--gpu')
     parser.add_argument('--instances', type=int, default=1024)
+    parser.add_argument('--maxiter', type=int, default=200)
     parser.add_argument('--out-dir')
     parser.add_argument('--log-level', default='warning')
     options = parser.parse_args()
@@ -109,5 +115,5 @@ if __name__ == '__main__':
         os.environ['CUDA_VISIBLE_DEVICES'] = options.gpu
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.15'
 
-    main(options.config, options.num_fermions, options.instances, options.out_dir,
+    main(options.config, options.num_fermions, options.instances, options.maxiter, options.out_dir,
          options.log_level)
